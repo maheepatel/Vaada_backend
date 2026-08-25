@@ -1,0 +1,2 @@
+const origins=(process.env.CORS_ORIGINS??'').split(',').map(item=>item.trim()).filter(Boolean);
+export const config={port:Number(process.env.PORT??8080),host:process.env.HOST??'0.0.0.0',origins,logLevel:process.env.LOG_LEVEL??'',supabaseUrl:process.env.SUPABASE_URL??'',supabaseAnonKey:process.env.SUPABASE_ANON_KEY??'',supabaseServiceRoleKey:process.env.SUPABASE_SERVICE_ROLE_KEY??'',openaiKey:process.env.OPENAI_API_KEY??'',openaiModel:process.env.OPENAI_EXTRACTION_MODEL??'gpt-5-mini',cronSecret:process.env.CRON_SECRET??''};
