@@ -11,7 +11,7 @@ cp .env.example .env
 
 1. Create one Supabase project.
 2. Run `supabase/schema.sql` in the Supabase SQL editor.
-3. Enable Anonymous Sign-Ins under Supabase Auth.
+3. Enable Email and Google providers under Supabase Auth. Anonymous Sign-Ins are not required and should remain disabled for the production submission workflow.
 4. Add the project URL, anon key and service-role key to `.env`.
 5. Add an OpenAI API key for image/PDF/link extraction.
 6. Seed the founding public register with `npm run db:seed`.
@@ -26,6 +26,14 @@ The local API defaults to `http://localhost:8080`.
 - `SUPABASE_SERVICE_ROLE_KEY`: server-only; never place it in web/mobile repos.
 - `OPENAI_API_KEY`: server-only extraction credential.
 - `CRON_SECRET`: protects candidate-ingestion jobs.
+
+## Identity and media rules
+
+- Public browsing never requires an account.
+- Google or verified email login is required for AI extraction, promise submissions, proof uploads and private receipts.
+- “Submit anonymously” hides contributor details from the public record; it does not create an unrecoverable anonymous Auth user.
+- Files live in the private `proof-media` bucket. `media_assets` stores ownership, purpose, MIME type, byte size and SHA-256 metadata. Database rows reference assets instead of storing binary data.
+- A promise-source upload publishes as `receipt` evidence; a completion upload publishes as `proof` evidence only after reviewer acceptance.
 
 ## Deploy
 

@@ -1,0 +1,106 @@
+-- Apply this once if the earlier Vaada schema has already been installed.
+-- New Supabase projects can run supabase/schema.sql instead.
+
+create table if not exists public.media_assets (
+  id uuid primary key default gen_random_uuid(), owner_id uuid not null references auth.users(id) on delete cascade,
+  bucket_id text not null default 'proof-media', storage_path text not null unique,
+  kind text not null check (kind in ('promise_source','completion_proof')),
+  original_filename text not null, mime_type text not null check (mime_type in ('image/jpeg','image/png','image/webp','application/pdf')),
+  size_bytes bigint not null check (size_bytes > 0 and size_bytes <= 10485760), sha256 text not null check (sha256 ~ '^[a-f0-9]{64}$'),
+  status text not null default 'pending' check (status in ('pending','attached','published','rejected','deleted')),
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+create index if not exists media_assets_owner_idx on public.media_assets(owner_id,created_at desc);
+alter table public.media_assets enable row level security;
+
+alter table public.submissions add column if not exists media_asset_id uuid unique references public.media_assets(id);
+alter table public.submissions add column if not exists proof_sha256 text;
+alter table public.submissions add column if not exists proof_size_bytes bigint;
+alter table public.submissions add column if not exists proof_original_name text;
+alter table public.evidence add column if not exists media_asset_id uuid unique references public.media_assets(id);
+alter table public.evidence add column if not exists file_sha256 text;
+alter table public.evidence add column if not exists file_size_bytes bigint;
+alter table public.evidence add column if not exists original_filename text;
+
+drop policy if exists "users insert their submission" on public.submissions;
+drop policy if exists "users read their submission" on public.submissions;
+drop policy if exists "users update queued submission" on public.submissions;
+drop policy if exists "permanent users insert their submission" on public.submissions;
+drop policy if exists "permanent users read their submission" on public.submissions;
+drop policy if exists "permanent users update queued submission" on public.submissions;
+create policy "permanent users insert their submission" on public.submissions for insert to authenticated with check (user_id=auth.uid() and status='queued' and (auth.jwt()->>'is_anonymous')::boolean is false);
+create policy "permanent users read their submission" on public.submissions for select to authenticated using (user_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
+create policy "permanent users update queued submission" on public.submissions for update to authenticated using (user_id=auth.uid() and status='queued' and (auth.jwt()->>'is_anonymous')::boolean is false) with check (user_id=auth.uid() and status='queued' and (auth.jwt()->>'is_anonymous')::boolean is false);
+
+drop policy if exists "users manage watches" on public.watchers;
+drop policy if exists "permanent users manage watches" on public.watchers;
+create policy "permanent users manage watches" on public.watchers for all to authenticated using (user_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false) with check (user_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
+
+drop policy if exists "users read own profile" on public.profiles;
+drop policy if exists "permanent users read own profile" on public.profiles;
+create policy "permanent users read own profile" on public.profiles for select to authenticated using (id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
+
+drop policy if exists "permanent users read own media metadata" on public.media_assets;
+create policy "permanent users read own media metadata" on public.media_assets for select to authenticated using (owner_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
+
+drop policy if exists "users upload own proof" on storage.objects;
+drop policy if exists "users read own proof" on storage.objects;
+
+create or replace function public.attach_submission_media() returns trigger language plpgsql security definer set search_path=public as $$
+declare asset public.media_assets; expected_kind text;
+begin
+  if new.media_asset_id is null then return new; end if;
+  select * into asset from public.media_assets where id=new.media_asset_id for update;
+  expected_kind:=case when new.submission_kind='proof' then 'completion_proof' else 'promise_source' end;
+  if not found or asset.owner_id<>new.user_id or asset.status<>'pending' or asset.kind<>expected_kind then raise exception 'invalid or unavailable media asset'; end if;
+  new.proof_path:=asset.storage_path; new.proof_mime_type:=asset.mime_type; new.proof_sha256:=asset.sha256;
+  new.proof_size_bytes:=asset.size_bytes; new.proof_original_name:=asset.original_filename;
+  update public.media_assets set status='attached',updated_at=now() where id=asset.id;
+  return new;
+end $$;
+drop trigger if exists before_submission_media on public.submissions;
+create trigger before_submission_media before insert on public.submissions for each row execute function public.attach_submission_media();
+
+create or replace view public.commitments_public with (security_invoker=true) as
+select c.*,
+  coalesce((select jsonb_agg(jsonb_build_object('id',e.id,'kind',e.kind,'title',e.title,'sourceKind',e.source_kind,'sourceUrl',e.source_url,'hasMedia',(e.media_asset_id is not null or e.storage_path is not null),'mediaType',e.media_type,'quote',e.quote,'direction',e.direction,'verdict',e.verdict,'documentDate',e.document_date,'reviewedAt',e.reviewed_at) order by e.document_date desc) from public.evidence e where e.commitment_id=c.id and e.verdict in ('verified','contested')),'[]'::jsonb) evidence,
+  coalesce((select jsonb_agg(jsonb_build_object('id',t.id,'date',t.event_date,'title',t.title,'detail',t.detail,'type',t.event_type) order by t.event_date) from public.timeline_events t where t.commitment_id=c.id),'[]'::jsonb) timeline
+from public.commitments c where c.published_at is not null;
+grant select on public.commitments_public to anon, authenticated;
+
+create or replace function public.review_submission(p_submission_id uuid,p_decision text,p_note text,p_progress_after smallint default null,p_mark_completed boolean default false) returns jsonb
+language plpgsql security definer set search_path=public as $$
+declare s public.submissions; c_id uuid; reviewer_role public.app_role; verified_progress smallint;
+begin
+  select role into reviewer_role from public.profiles where id=auth.uid();
+  if reviewer_role not in ('reviewer','admin') then raise exception 'reviewer access required'; end if;
+  if p_decision not in ('accepted','rejected','needs_info') then raise exception 'invalid decision'; end if;
+  select * into s from public.submissions where id=p_submission_id and status='queued' for update;
+  if not found then raise exception 'queued submission not found'; end if;
+  if s.user_id=auth.uid() and reviewer_role<>'admin' then raise exception 'reviewers cannot decide their own submissions'; end if;
+  if p_decision='accepted' then
+    if s.submission_kind='proof' then
+      if s.target_commitment_id is null then raise exception 'proof target not found'; end if;
+      c_id:=s.target_commitment_id;
+      select case when p_mark_completed then 100 else greatest(progress,coalesce(p_progress_after,progress)) end into verified_progress from public.commitments where id=c_id for update;
+      insert into public.evidence(commitment_id,kind,title,source_kind,source_url,media_asset_id,storage_path,media_type,file_sha256,file_size_bytes,original_filename,quote,direction,verdict,document_date,reviewed_at,reviewed_by)
+      values(c_id,'proof',s.title,case when s.proof_path is null then 'press_link' else 'signed_document' end,coalesce(s.source_url,''),s.media_asset_id,s.proof_path,s.proof_mime_type,s.proof_sha256,s.proof_size_bytes,s.proof_original_name,left(s.promise_text,500),'supports','verified',coalesce(s.promised_on,current_date),now(),auth.uid());
+      update public.media_assets set status='published',updated_at=now() where id=s.media_asset_id;
+      update public.commitments set progress=verified_progress,status=case when p_mark_completed or verified_progress=100 then 'fulfilled'::public.commitment_status when status='fulfilled' then status else 'in_progress'::public.commitment_status end,updated_at=now() where id=c_id;
+      insert into public.timeline_events(commitment_id,event_date,title,detail,event_type) values(c_id,current_date,case when p_mark_completed or verified_progress=100 then 'Promise marked complete' else 'Verified progress updated' end,p_note,'status');
+    else
+      insert into public.commitments(slug,title,detail,state,state_slug,district,district_slug,category,status,promised_on,deadline_start,deadline,deadline_label,progress,beneficiaries,accountable_office,published_at)
+      values(lower(regexp_replace(s.title,'[^a-zA-Z0-9]+','-','g'))||'-'||left(s.id::text,8),s.title,s.promise_text,s.state,lower(regexp_replace(s.state,'[^a-zA-Z0-9]+','-','g')),coalesce(s.district,'Not stated'),lower(regexp_replace(coalesce(s.district,'not-stated'),'[^a-zA-Z0-9]+','-','g')),s.category,'promised',coalesce(s.promised_on,current_date),s.deadline_start,s.deadline,s.deadline_label,0,'Not stated',coalesce(s.accountable_office,'Not stated'),now()) returning id into c_id;
+      insert into public.evidence(commitment_id,kind,title,source_kind,source_url,media_asset_id,storage_path,media_type,file_sha256,file_size_bytes,original_filename,quote,verdict,document_date,reviewed_at,reviewed_by)
+      values(c_id,'receipt','Original submitted source',case when s.proof_path is null then 'press_link' else 'signed_document' end,coalesce(s.source_url,''),s.media_asset_id,s.proof_path,s.proof_mime_type,s.proof_sha256,s.proof_size_bytes,s.proof_original_name,left(s.promise_text,500),'verified',coalesce(s.promised_on,current_date),now(),auth.uid());
+      update public.media_assets set status='published',updated_at=now() where id=s.media_asset_id;
+      insert into public.timeline_events(commitment_id,event_date,title,detail,event_type) values(c_id,coalesce(s.promised_on,current_date),'Promise recorded','Accepted after human review of the original source.','promise');
+    end if;
+  end if;
+  update public.submissions set status=p_decision::public.review_status,review_note=p_note,reviewed_at=now(),reviewed_by=auth.uid(),published_commitment_id=c_id,updated_at=now() where id=s.id;
+  if p_decision='rejected' then update public.media_assets set status='rejected',updated_at=now() where id=s.media_asset_id; end if;
+  insert into public.audit_events(actor_id,entity_type,entity_id,action,before_data,after_data,note) values(auth.uid(),'submission',s.id,'review_decision',to_jsonb(s),jsonb_build_object('status',p_decision,'published_commitment_id',c_id),p_note);
+  return jsonb_build_object('submission_id',s.id,'decision',p_decision,'commitment_id',c_id);
+end $$;
+revoke all on function public.review_submission(uuid,text,text,smallint,boolean) from public;
+grant execute on function public.review_submission(uuid,text,text,smallint,boolean) to authenticated;
