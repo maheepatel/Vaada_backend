@@ -39,7 +39,7 @@ The local API defaults to `http://localhost:8080`.
 
 Deploy this repository as a Node.js service on Railway, Render, Fly.io or another container/Node host. Use `npm run build` as the build command, `npm start` as the start command, and expose the platform-provided `PORT`.
 
-After deployment, set its URL in both frontend projects and add the website origin to `CORS_ORIGINS`.
+After deployment, set its URL in both frontend projects and add the website origin to `CORS_ORIGINS`. `/health` confirms that the Node process is alive. `/ready` must return HTTP 200 with every check set to `true` before testing authentication, uploads or AI extraction.
 
 ## Validation
 

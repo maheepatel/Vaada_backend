@@ -69,6 +69,8 @@ After deployment, open `https://YOUR_RENDER_SERVICE/health`. It must return:
 {"ok":true,"service":"vaada-backend"}
 ```
 
+Then open `https://YOUR_RENDER_SERVICE/ready`. Do not continue until it returns HTTP 200 and all four checks (`cors`, `supabase`, `ai`, and `agent`) are `true`.
+
 ## 4. Connect Vercel
 
 In **Vercel → Vaada_frontend → Settings → Environment Variables**, add for Production and Preview:

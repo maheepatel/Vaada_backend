@@ -5,7 +5,7 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { config } from './config.js';
+import { config, readinessChecks } from './config.js';
 import { extractWithAgent, fetchPublicSourceText } from './extract.js';
 import { getCommitment, listCommitments } from './repository.js';
 import { bearer, publicSupabase, serviceSupabase } from './supabase.js';
@@ -25,11 +25,12 @@ async function reviewerFrom(request:FastifyRequest){const auth=await permanentUs
 
 export async function buildApp(){
   const app=Fastify({logger:config.logLevel?{level:config.logLevel}:false,bodyLimit:11*1024*1024});
-  await app.register(cors,{origin:(origin,callback)=>{if(!origin||!config.origins.length||config.origins.includes(origin))callback(null,true);else callback(new Error('Origin not allowed'),false);},allowedHeaders:['content-type','authorization','x-cron-secret'],methods:['GET','POST','OPTIONS']});
+  await app.register(cors,{origin:(origin,callback)=>{if(!origin||config.origins.includes(origin))callback(null,true);else callback(new Error('Origin not allowed'),false);},allowedHeaders:['content-type','authorization','x-cron-secret'],methods:['GET','POST','OPTIONS']});
   await app.register(helmet,{contentSecurityPolicy:false});
   await app.register(rateLimit,{max:120,timeWindow:'1 minute'});
   await app.register(multipart,{limits:{fileSize:10*1024*1024,files:1,fields:10}});
   app.get('/health',async()=>({ok:true,service:'vaada-backend'}));
+  app.get('/ready',async(_request,reply)=>{const ok=Object.values(readinessChecks).every(Boolean);return reply.code(ok?200:503).send({ok,service:'vaada-backend',checks:readinessChecks})});
   app.get('/v1/promises',async()=>({commitments:await listCommitments()}));
   app.get('/v1/promises/:slug',async(request,reply)=>{const{slug}=request.params as{slug:string};const commitment=await getCommitment(slug);return commitment?{commitment}:reply.code(404).send({error:'Promise record not found.'})});
 
