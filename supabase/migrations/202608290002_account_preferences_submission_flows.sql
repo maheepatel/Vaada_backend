@@ -1,0 +1,31 @@
+-- Editable account preferences without allowing public role escalation.
+alter table public.profiles add column if not exists contributor_type text not null default 'citizen';
+alter table public.profiles add column if not exists default_submit_anonymously boolean not null default true;
+alter table public.profiles add column if not exists preferences_configured_at timestamptz;
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
+alter table public.profiles drop constraint if exists profiles_contributor_type_check;
+alter table public.profiles add constraint profiles_contributor_type_check check (contributor_type in ('citizen','government_official'));
+
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$
+begin
+  insert into public.profiles(id,display_name) values(new.id,nullif(trim(new.raw_user_meta_data->>'full_name'),'')) on conflict do nothing;
+  return new;
+end $$;
+
+drop function if exists public.update_my_profile(text,text,boolean);
+create or replace function public.update_my_profile(p_display_name text,p_contributor_type text,p_default_submit_anonymously boolean)
+returns table(role public.app_role,display_name text,contributor_type text,default_submit_anonymously boolean,preferences_configured_at timestamptz,updated_at timestamptz)
+language plpgsql security definer set search_path=public as $$
+declare actor uuid:=auth.uid(); before_profile jsonb;
+begin
+  if actor is null then raise exception 'authentication required'; end if;
+  if p_contributor_type not in ('citizen','government_official') then raise exception 'invalid contributor type'; end if;
+  if char_length(trim(p_display_name))>120 then raise exception 'display name is too long'; end if;
+  if not p_default_submit_anonymously and char_length(trim(p_display_name))<2 then raise exception 'display name required for public credit'; end if;
+  select to_jsonb(p) into before_profile from public.profiles p where p.id=actor for update;
+  if before_profile is null then raise exception 'profile not found'; end if;
+  return query update public.profiles p set display_name=nullif(trim(p_display_name),''),contributor_type=p_contributor_type,default_submit_anonymously=p_default_submit_anonymously,preferences_configured_at=now(),updated_at=now() where p.id=actor returning p.role,p.display_name,p.contributor_type,p.default_submit_anonymously,p.preferences_configured_at,p.updated_at;
+  insert into public.audit_events(actor_id,entity_type,entity_id,action,before_data,after_data,note) select actor,'profile',actor,'preferences_updated',before_profile,to_jsonb(p),'User updated contributor and public-credit defaults.' from public.profiles p where p.id=actor;
+end $$;
+revoke all on function public.update_my_profile(text,text,boolean) from public;
+grant execute on function public.update_my_profile(text,text,boolean) to authenticated;

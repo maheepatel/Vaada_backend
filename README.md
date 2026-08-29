@@ -34,6 +34,16 @@ The local API defaults to `http://localhost:8080`.
 - “Submit anonymously” hides contributor details from the public record; it does not create an unrecoverable anonymous Auth user.
 - Files live in the private `proof-media` bucket. `media_assets` stores ownership, purpose, MIME type, byte size and SHA-256 metadata. Database rows reference assets instead of storing binary data.
 - A promise-source upload publishes as `receipt` evidence; a completion upload publishes as `proof` evidence only after reviewer acceptance.
+- Account preferences are saved through `PATCH /v1/me/profile`. Contributor type and public-credit defaults are user-editable; reviewer/admin roles are not.
+- New accounts are not presented as having chosen account preferences until `preferences_configured_at` is written by the profile RPC.
+
+## Submission workflows
+
+- `POST /v1/extract` prepares an editable promise draft from a required public link or uploaded image/PDF. AI output is advisory and never publishes a record.
+- `POST /v1/submissions` accepts promise records and completion proofs as separate submission kinds.
+- A completion proof must target an existing open promise and include a public completion link or an uploaded image/PDF.
+- Link-only completion proof receives a conservative relevance screen. Uploaded completion files are queued for human review without AI interpretation in v1.
+- Reviewer acceptance is the only path that turns queued evidence into a public source/proof or changes progress.
 
 ## Deploy
 

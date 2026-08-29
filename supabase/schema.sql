@@ -11,7 +11,10 @@ create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   role public.app_role not null default 'citizen',
   display_name text,
-  created_at timestamptz not null default now()
+  contributor_type text not null default 'citizen' check (contributor_type in ('citizen','government_official')),
+  default_submit_anonymously boolean not null default true,
+  preferences_configured_at timestamptz,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
 
 create table public.media_assets (
@@ -115,8 +118,25 @@ create policy "permanent users read own media metadata" on public.media_assets f
 create policy "permanent users manage watches" on public.watchers for all to authenticated using (user_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false) with check (user_id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
 create policy "permanent users read own profile" on public.profiles for select to authenticated using (id=auth.uid() and (auth.jwt()->>'is_anonymous')::boolean is false);
 
-create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$ begin insert into public.profiles(id) values(new.id) on conflict do nothing; return new; end $$;
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$ begin insert into public.profiles(id,display_name) values(new.id,nullif(trim(new.raw_user_meta_data->>'full_name'),'')) on conflict do nothing; return new; end $$;
 create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
+
+create or replace function public.update_my_profile(p_display_name text,p_contributor_type text,p_default_submit_anonymously boolean)
+returns table(role public.app_role,display_name text,contributor_type text,default_submit_anonymously boolean,preferences_configured_at timestamptz,updated_at timestamptz)
+language plpgsql security definer set search_path=public as $$
+declare actor uuid:=auth.uid(); before_profile jsonb;
+begin
+  if actor is null then raise exception 'authentication required'; end if;
+  if p_contributor_type not in ('citizen','government_official') then raise exception 'invalid contributor type'; end if;
+  if char_length(trim(p_display_name))>120 then raise exception 'display name is too long'; end if;
+  if not p_default_submit_anonymously and char_length(trim(p_display_name))<2 then raise exception 'display name required for public credit'; end if;
+  select to_jsonb(p) into before_profile from public.profiles p where p.id=actor for update;
+  if before_profile is null then raise exception 'profile not found'; end if;
+  return query update public.profiles p set display_name=nullif(trim(p_display_name),''),contributor_type=p_contributor_type,default_submit_anonymously=p_default_submit_anonymously,preferences_configured_at=now(),updated_at=now() where p.id=actor returning p.role,p.display_name,p.contributor_type,p.default_submit_anonymously,p.preferences_configured_at,p.updated_at;
+  insert into public.audit_events(actor_id,entity_type,entity_id,action,before_data,after_data,note) select actor,'profile',actor,'preferences_updated',before_profile,to_jsonb(p),'User updated contributor and public-credit defaults.' from public.profiles p where p.id=actor;
+end $$;
+revoke all on function public.update_my_profile(text,text,boolean) from public;
+grant execute on function public.update_my_profile(text,text,boolean) to authenticated;
 
 create or replace function public.attach_submission_media() returns trigger language plpgsql security definer set search_path=public as $$
 declare asset public.media_assets; expected_kind text;
