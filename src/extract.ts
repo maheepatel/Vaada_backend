@@ -214,7 +214,7 @@ export async function extractWithAgent(input: {
       DraftSchema,
       "vaada_promise_draft",
     );
-    const response_: any = await (client as any).beta.chat.completions.parse({
+    const response_: any = await client.chat.completions.parse({
       model: config.openaiModel,
       messages: [
         {
