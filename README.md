@@ -34,7 +34,7 @@ The local API defaults to `http://localhost:8080`.
 - “Submit anonymously” hides contributor details from the public record; it does not create an unrecoverable anonymous Auth user.
 - Files live in the private `proof-media` bucket. `media_assets` stores ownership, purpose, MIME type, byte size and SHA-256 metadata. Database rows reference assets instead of storing binary data.
 - A promise-source upload publishes as `receipt` evidence; a completion upload publishes as `proof` evidence only after reviewer acceptance.
-- Account preferences are saved through `PATCH /v1/me/profile`. Contributor type and public-credit defaults are user-editable; reviewer/admin roles are not.
+- Account preferences are saved through `PATCH /v1/me/profile`. Citizen, government-official and news-reporter contributor types plus public-credit defaults are user-editable; reviewer/admin roles are not.
 - New accounts are not presented as having chosen account preferences until `preferences_configured_at` is written by the profile RPC.
 
 ## Submission workflows
@@ -44,6 +44,10 @@ The local API defaults to `http://localhost:8080`.
 - A completion proof must target an existing open promise and include a public completion link or an uploaded image/PDF.
 - Link-only completion proof receives a conservative relevance screen. Uploaded completion files are queued for human review without AI interpretation in v1.
 - Reviewer acceptance is the only path that turns queued evidence into a public source/proof or changes progress.
+- Before acceptance, the public promise API exposes only the number of queued completion-proof submissions. It never exposes their links, files or contributor identity.
+- Completion-proof title and description metadata are generated from the selected promise by a database trigger; users provide only the completion link and/or file.
+
+For an existing Supabase project, run new files in `supabase/migrations/` in filename order. The latest required files are `202608290003_news_reporter_profile.sql` and `202608290004_completion_proof_metadata.sql`.
 
 ## Deploy
 

@@ -11,7 +11,7 @@ create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   role public.app_role not null default 'citizen',
   display_name text,
-  contributor_type text not null default 'citizen' check (contributor_type in ('citizen','government_official')),
+  contributor_type text not null default 'citizen' check (contributor_type in ('citizen','government_official','news_reporter')),
   default_submit_anonymously boolean not null default true,
   preferences_configured_at timestamptz,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now()
@@ -127,7 +127,7 @@ language plpgsql security definer set search_path=public as $$
 declare actor uuid:=auth.uid(); before_profile jsonb;
 begin
   if actor is null then raise exception 'authentication required'; end if;
-  if p_contributor_type not in ('citizen','government_official') then raise exception 'invalid contributor type'; end if;
+  if p_contributor_type not in ('citizen','government_official','news_reporter') then raise exception 'invalid contributor type'; end if;
   if char_length(trim(p_display_name))>120 then raise exception 'display name is too long'; end if;
   if not p_default_submit_anonymously and char_length(trim(p_display_name))<2 then raise exception 'display name required for public credit'; end if;
   select to_jsonb(p) into before_profile from public.profiles p where p.id=actor for update;
@@ -151,6 +151,21 @@ begin
   return new;
 end $$;
 create trigger before_submission_media before insert on public.submissions for each row execute function public.attach_submission_media();
+
+create or replace function public.normalize_completion_proof_submission() returns trigger language plpgsql set search_path='' as $$
+declare target_title text;
+begin
+  if new.submission_kind='proof' then
+    select title into target_title from public.commitments where id=new.target_commitment_id;
+    if target_title is null then raise exception 'proof target not found'; end if;
+    new.title:=left('Completion proof for '||target_title,180);
+    new.promise_text:=left('Completion evidence submitted for the public promise: '||target_title,10000);
+    new.promised_on:=null; new.deadline_start:=null; new.deadline:=null; new.deadline_label:=null;
+    new.raw_text:=null; new.ai_confidence:='{}'::jsonb; new.ai_warnings:='[]'::jsonb;
+  end if;
+  return new;
+end $$;
+create trigger normalize_completion_proof_metadata before insert on public.submissions for each row execute function public.normalize_completion_proof_submission();
 
 create or replace view public.commitments_public with (security_invoker=true) as
 select c.*,
