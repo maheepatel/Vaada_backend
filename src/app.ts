@@ -235,12 +235,9 @@ export async function buildApp() {
         .send({ error: "Log in to update account settings." });
     const parsed = profileSchema.safeParse(request.body);
     if (!parsed.success)
-      return reply
-        .code(400)
-        .send({
-          error:
-            parsed.error.issues[0]?.message ?? "Check the account settings.",
-        });
+      return reply.code(400).send({
+        error: parsed.error.issues[0]?.message ?? "Check the account settings.",
+      });
     const client = publicSupabase(auth.token)!;
     const { data, error } = await client.rpc("update_my_profile", {
       p_display_name: parsed.data.displayName,
@@ -295,26 +292,21 @@ export async function buildApp() {
         file &&
         (!allowedMime.has(file.mimeType) || !matchesDeclaredType(file))
       )
-        return reply
-          .code(415)
-          .send({
-            error:
-              "The file contents must be a genuine JPEG, PNG, WebP or PDF.",
-          });
+        return reply.code(415).send({
+          error: "The file contents must be a genuine JPEG, PNG, WebP or PDF.",
+        });
       let sourceText = rawText;
       if (!sourceText && sourceUrl) {
         try {
           sourceText = await fetchPublicSourceText(sourceUrl);
         } catch (error) {
           if (!file)
-            return reply
-              .code(422)
-              .send({
-                error:
-                  error instanceof Error
-                    ? error.message
-                    : "Could not read the source.",
-              });
+            return reply.code(422).send({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Could not read the source.",
+            });
         }
       }
       try {
@@ -329,12 +321,9 @@ export async function buildApp() {
             "Extracted fields are suggestions. Review the original source before submission.",
         };
       } catch (error) {
-        return reply
-          .code(422)
-          .send({
-            error:
-              error instanceof Error ? error.message : "Extraction failed.",
-          });
+        return reply.code(422).send({
+          error: error instanceof Error ? error.message : "Extraction failed.",
+        });
       }
     },
   );
@@ -345,11 +334,9 @@ export async function buildApp() {
     async (request, reply) => {
       const auth = await permanentUserFrom(request);
       if (!auth)
-        return reply
-          .code(401)
-          .send({
-            error: "Log in with Google or email before uploading evidence.",
-          });
+        return reply.code(401).send({
+          error: "Log in with Google or email before uploading evidence.",
+        });
       const { fields, file } = await multipartInput(request);
       if (!file)
         return reply
@@ -358,29 +345,21 @@ export async function buildApp() {
       if (!file.mimeType)
         return reply.code(400).send({ error: "File mime type is missing." });
       if (!allowedMime.has(file.mimeType) || !matchesDeclaredType(file))
-        return reply
-          .code(415)
-          .send({
-            error:
-              "The file contents must be a genuine JPEG, PNG, WebP or PDF.",
-          });
+        return reply.code(415).send({
+          error: "The file contents must be a genuine JPEG, PNG, WebP or PDF.",
+        });
       const kindValue = (fields.kind ?? "").trim().toLowerCase();
       if (!kindValue)
-        return reply
-          .code(400)
-          .send({
-            error:
-              'Specify proof kind: "promise_source" or "completion_proof".',
-          });
+        return reply.code(400).send({
+          error: 'Specify proof kind: "promise_source" or "completion_proof".',
+        });
       const kind = z
         .enum(["promise_source", "completion_proof"])
         .safeParse(kindValue);
       if (!kind.success)
-        return reply
-          .code(400)
-          .send({
-            error: `Invalid proof kind "${kindValue}". Use "promise_source" or "completion_proof".`,
-          });
+        return reply.code(400).send({
+          error: `Invalid proof kind "${kindValue}". Use "promise_source" or "completion_proof".`,
+        });
       const extension: Record<string, string> = {
         "image/jpeg": "jpg",
         "image/png": "png",
@@ -402,7 +381,13 @@ export async function buildApp() {
         return reply
           .code(400)
           .send({ error: `Storage upload failed: ${uploaded.error.message}` });
-      const { data: asset, error } = await auth.service
+
+      // Use public client with user JWT for RLS-compliant insert
+      const publicClient = publicSupabase(auth.token);
+      if (!publicClient)
+        return reply.code(503).send({ error: "Database client unavailable." });
+
+      const { data: asset, error } = await publicClient
         .from("media_assets")
         .insert({
           id: assetId,
@@ -424,31 +409,26 @@ export async function buildApp() {
           .code(400)
           .send({ error: `Database error: ${error.message}` });
       }
-      return reply
-        .code(201)
-        .send({
-          asset: {
-            id: asset.id,
-            kind: asset.kind,
-            originalName: asset.original_filename,
-            mimeType: asset.mime_type,
-            sizeBytes: asset.size_bytes,
-            sha256: asset.sha256,
-            status: asset.status,
-          },
-        });
+      return reply.code(201).send({
+        asset: {
+          id: asset.id,
+          kind: asset.kind,
+          originalName: asset.original_filename,
+          mimeType: asset.mime_type,
+          sizeBytes: asset.size_bytes,
+          sha256: asset.sha256,
+          status: asset.status,
+        },
+      });
     },
   );
 
   app.post("/v1/submissions", async (request, reply) => {
     const parsed = submissionSchema.safeParse(request.body);
     if (!parsed.success)
-      return reply
-        .code(400)
-        .send({
-          error:
-            parsed.error.issues[0]?.message ?? "Check the required fields.",
-        });
+      return reply.code(400).send({
+        error: parsed.error.issues[0]?.message ?? "Check the required fields.",
+      });
     const auth = await permanentUserFrom(request);
     if (!auth)
       return reply
@@ -479,12 +459,10 @@ export async function buildApp() {
         try {
           sourceText = await fetchPublicSourceText(value.sourceUrl);
         } catch {
-          return reply
-            .code(422)
-            .send({
-              error:
-                "We could not read that proof link. Upload an image or PDF instead.",
-            });
+          return reply.code(422).send({
+            error:
+              "We could not read that proof link. Upload an image or PDF instead.",
+          });
         }
         const assessment = assessCompletionSource(
           {
@@ -497,12 +475,10 @@ export async function buildApp() {
           sourceText,
         );
         if (!assessment.relevant)
-          return reply
-            .code(422)
-            .send({
-              error:
-                "This link does not clearly match the selected promise and a completion update. Check the link or upload proof for human review.",
-            });
+          return reply.code(422).send({
+            error:
+              "This link does not clearly match the selected promise and a completion update. Check the link or upload proof for human review.",
+          });
       }
     }
     if (value.mediaAssetId) {
@@ -517,12 +493,10 @@ export async function buildApp() {
           ? "completion_proof"
           : "promise_source";
       if (!asset || asset.status !== "pending" || asset.kind !== expected)
-        return reply
-          .code(400)
-          .send({
-            error:
-              "That upload is unavailable, already attached, or belongs to another account.",
-          });
+        return reply.code(400).send({
+          error:
+            "That upload is unavailable, already attached, or belongs to another account.",
+        });
     }
     const { data, error } = await supabase
       .from("submissions")
@@ -571,11 +545,9 @@ export async function buildApp() {
   app.get("/v1/me/submissions", async (request, reply) => {
     const auth = await permanentUserFrom(request);
     if (!auth)
-      return reply
-        .code(401)
-        .send({
-          error: "Log in with Google or email to view private receipts.",
-        });
+      return reply.code(401).send({
+        error: "Log in with Google or email to view private receipts.",
+      });
     const supabase = publicSupabase(auth.token)!;
     const { data, error } = await supabase
       .from("submissions")
