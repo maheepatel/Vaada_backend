@@ -4,6 +4,25 @@ import { z } from "zod";
 import { config } from "./config.js";
 import type { ExtractedDraft } from "./types.js";
 
+// OpenAI's strict Structured Outputs mode requires every object in the schema
+// to enumerate a fixed set of properties with additionalProperties:false. A
+// free-form z.record(...) has no fixed key set, so OpenAI rejects it with:
+// "Object schema at `properties/confidence` must set `additionalProperties:
+// false`". Enumerate the exact fields we score instead of using a dictionary.
+const ConfidenceSchema = z
+  .object({
+    title: z.number().min(0).max(1),
+    promiseText: z.number().min(0).max(1),
+    promisedOn: z.number().min(0).max(1),
+    deadlineStart: z.number().min(0).max(1),
+    deadlineEnd: z.number().min(0).max(1),
+    deadlineLabel: z.number().min(0).max(1),
+    state: z.number().min(0).max(1),
+    district: z.number().min(0).max(1),
+    category: z.number().min(0).max(1),
+    accountableOffice: z.number().min(0).max(1),
+  })
+  .strict();
 const DraftSchema = z.object({
   title: z.string(),
   promiseText: z.string(),
@@ -15,7 +34,7 @@ const DraftSchema = z.object({
   district: z.string(),
   category: z.string(),
   accountableOffice: z.string(),
-  confidence: z.record(z.string(), z.number().min(0).max(1)),
+  confidence: ConfidenceSchema,
   warnings: z.array(z.string()),
 });
 const states = [

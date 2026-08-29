@@ -183,6 +183,58 @@ export async function buildApp() {
       : reply.code(404).send({ error: "Promise record not found." });
   });
 
+  app.get("/v1/promises/:slug/proofs", async (request, reply) => {
+    const { slug } = request.params as { slug: string };
+    const supabase = publicSupabase();
+    if (!supabase)
+      return reply.code(503).send({ error: "Database unavailable." });
+
+    // Get commitment by slug (must be published)
+    const { data: commitment, error: commitmentError } = await supabase
+      .from("commitments")
+      .select("id")
+      .eq("slug", slug)
+      .not("published_at", "is", null)
+      .maybeSingle();
+
+    if (commitmentError || !commitment)
+      return reply.code(404).send({ error: "Promise not found." });
+
+    // Get verified proofs for this commitment
+    const { data: proofs, error: proofsError } = await supabase
+      .from("evidence")
+      .select(
+        "id,kind,title,source_kind,source_url,media_asset_id,storage_path,media_type,verdict,document_date,reviewed_at,original_filename,size_bytes",
+      )
+      .eq("commitment_id", commitment.id)
+      .in("verdict", ["verified", "contested"])
+      .order("document_date", { ascending: false });
+
+    if (proofsError)
+      return reply.code(500).send({ error: "Failed to fetch proofs." });
+
+    // Generate signed URLs for media
+    const serviceClient = serviceSupabase();
+    const proofsWithUrls = await Promise.all(
+      (proofs || []).map(async (proof) => {
+        if (!proof.storage_path) return proof;
+
+        const { data: signed } = serviceClient
+          ? await serviceClient.storage
+              .from("proof-media")
+              .createSignedUrl(proof.storage_path, 7200)
+          : { data: null };
+
+        return {
+          ...proof,
+          mediaUrl: signed?.signedUrl ?? null,
+        };
+      }),
+    );
+
+    return { proofs: proofsWithUrls };
+  });
+
   app.get("/v1/me/profile", async (request, reply) => {
     const auth = await permanentUserFrom(request);
     if (!auth)
