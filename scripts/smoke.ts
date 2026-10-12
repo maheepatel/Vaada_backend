@@ -148,17 +148,28 @@ try {
   failures++;
   console.error("ABORTED:", error instanceof Error ? error.message : error);
 } finally {
-  // Clean up everything this run created.
-  if (commitmentId) await service.from("commitments").delete().eq("id", commitmentId); // cascades evidence + timeline
-  if (submissionId) {
-    await service.from("audit_events").delete().eq("entity_id", submissionId);
-    await service.from("submissions").delete().eq("id", submissionId);
+  // Remove everything this run (and any earlier aborted run) created. Order
+  // matters because of foreign keys: submissions -> commitments (+evidence) ->
+  // media_assets -> users. Only rows labelled SMOKE TEST or owned by the
+  // @vaada-smoke.example.com test users are touched.
+  const users = (await service.auth.admin.listUsers({ perPage: 1000 })).data.users.filter((u) => u.email?.endsWith("@vaada-smoke.example.com"));
+  const userIds = users.map((u) => u.id);
+  const note = (what: string, error: { message: string } | null) => { if (error) { failures++; console.error(`CLEANUP FAILED (${what}): ${error.message}`); } };
+  const subs = await service.from("submissions").select("id").or(`title.like.SMOKE TEST%${userIds.length ? ",user_id.in.(" + userIds.join(",") + ")" : ""}`);
+  const subIds = (subs.data ?? []).map((r) => r.id);
+  const assets = userIds.length ? await service.from("media_assets").select("storage_path").in("owner_id", userIds) : { data: [] as { storage_path: string }[] };
+  const paths = [...new Set([...storagePaths, ...(assets.data ?? []).map((r) => r.storage_path)])];
+  if (subIds.length) {
+    note("audit_events", (await service.from("audit_events").delete().in("entity_id", subIds)).error);
+    note("submissions", (await service.from("submissions").delete().in("id", subIds)).error);
   }
-  if (userId) {
-    await service.from("media_assets").delete().eq("owner_id", userId);
-    await service.auth.admin.deleteUser(userId);
+  note("commitments", (await service.from("commitments").delete().like("title", "SMOKE TEST%")).error); // cascades evidence + timeline
+  if (userIds.length) {
+    note("audit_events(actor)", (await service.from("audit_events").delete().in("actor_id", userIds)).error);
+    note("media_assets", (await service.from("media_assets").delete().in("owner_id", userIds)).error);
+    for (const id of userIds) note("auth user", (await service.auth.admin.deleteUser(id)).error);
   }
-  if (storagePaths.length) await service.storage.from("proof-media").remove(storagePaths);
+  if (paths.length) note("storage", (await service.storage.from("proof-media").remove(paths)).error);
   await app.close();
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed. Test data removed.");
   process.exit(failures ? 1 : 0);

@@ -252,31 +252,32 @@ export async function buildApp() {
     const { data: proofs, error: proofsError } = await supabase
       .from("evidence")
       .select(
-        "id,kind,title,source_kind,source_url,media_asset_id,storage_path,media_type,verdict,document_date,reviewed_at,original_filename,size_bytes",
+        "id,kind,title,source_kind,source_url,media_asset_id,storage_path,media_type,verdict,document_date,reviewed_at,original_filename,file_size_bytes",
       )
       .eq("commitment_id", commitment.id)
       .in("verdict", ["verified", "contested"])
       .order("document_date", { ascending: false });
 
-    if (proofsError)
+    if (proofsError) {
+      logDbError("Proofs lookup", proofsError);
       return reply.code(500).send({ error: "Failed to fetch proofs." });
+    }
 
-    // Generate signed URLs for media
+    // Generate signed URLs for media. The internal storage path (it contains
+    // the uploader's user id) is used to sign but never returned.
     const serviceClient = serviceSupabase();
     const proofsWithUrls = await Promise.all(
-      (proofs || []).map(async (proof) => {
-        if (!proof.storage_path) return proof;
+      (proofs || []).map(async ({ storage_path, file_size_bytes, ...proof }) => {
+        const base = { ...proof, hasMedia: Boolean(storage_path), sizeBytes: file_size_bytes };
+        if (!storage_path) return base;
 
         const { data: signed } = serviceClient
           ? await serviceClient.storage
               .from("proof-media")
-              .createSignedUrl(proof.storage_path, 7200)
+              .createSignedUrl(storage_path, 7200)
           : { data: null };
 
-        return {
-          ...proof,
-          mediaUrl: signed?.signedUrl ?? null,
-        };
+        return { ...base, mediaUrl: signed?.signedUrl ?? null };
       }),
     );
 
