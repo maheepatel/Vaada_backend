@@ -12,7 +12,9 @@
 ## 🚀 Immediate Actions Required
 
 ### 1. Apply Database Migration (CRITICAL) ⚠️
+
 Go to Supabase SQL Editor and run:
+
 ```
 https://app.supabase.com/project/nlbqvxupzjxkhilpcifo/sql/new
 ```
@@ -22,6 +24,7 @@ Copy and paste file: `supabase/migrations/202608300005_fix_rls_policies.sql`
 **This fixes the 403 Forbidden errors on profile access.**
 
 ### 2. Deploy Backend to Onrender
+
 ```bash
 git add -A
 git commit -m "fix: OpenAI model, API syntax, RLS policies, error handling"
@@ -29,25 +32,28 @@ git push origin main
 ```
 
 ### 3. Test Endpoints
+
 Use the curl commands in FIXES_APPLIED.md to verify:
+
 - [ ] Image upload works
-- [ ] Link extraction works  
+- [ ] Link extraction works
 - [ ] Profile fetch works
 - [ ] Heuristic extraction works (text only)
 
 ## 📊 What Each Fix Solves
 
-| Error | Root Cause | Fixed By |
-|-------|-----------|----------|
-| `400 Bad Request` on `/v1/uploads/proof` | Missing kind validation | Better validation & logging |
+| Error                                        | Root Cause               | Fixed By                     |
+| -------------------------------------------- | ------------------------ | ---------------------------- |
+| `400 Bad Request` on `/v1/uploads/proof`     | Missing kind validation  | Better validation & logging  |
 | `422 Unprocessable Content` on `/v1/extract` | Wrong OpenAI API + model | Fixed API call + gpt-4o-mini |
-| `403 Forbidden` on profile fetch | Missing RLS policies | New migration file |
-| Image/PDF not processed | Wrong media format | OpenAI SDK v7 format |
-| No error details | Silent failures | Added error logging |
+| `403 Forbidden` on profile fetch             | Missing RLS policies     | New migration file           |
+| Image/PDF not processed                      | Wrong media format       | OpenAI SDK v7 format         |
+| No error details                             | Silent failures          | Added error logging          |
 
 ## 🔍 How to Verify Each Fix
 
 ### Test 1: Image Upload
+
 ```bash
 # Using curl or Postman
 POST /v1/uploads/proof
@@ -60,6 +66,7 @@ Expected: 201 Created with asset details
 ```
 
 ### Test 2: Link Extraction
+
 ```bash
 POST /v1/extract
 Headers: Authorization: Bearer {token}
@@ -70,6 +77,7 @@ Expected: 200 OK with extracted promise details
 ```
 
 ### Test 3: Profile Access
+
 ```bash
 GET /v1/me/profile
 Headers: Authorization: Bearer {token}
