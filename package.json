@@ -12,7 +12,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "db:seed": "node --import tsx scripts/seed.ts"
+    "db:seed": "node --import tsx scripts/seed.ts",
+    "smoke": "node --env-file=.env --import tsx scripts/smoke.ts --confirm-live"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

@@ -104,6 +104,7 @@ function matchesDeclaredType(file: Upload) {
 async function multipartInput(request: FastifyRequest) {
   const fields: Record<string, string> = {};
   let file: Upload | undefined;
+  let tooLarge = false;
   try {
     for await (const part of request.parts()) {
       if (part.type === "file") {
@@ -112,11 +113,19 @@ async function multipartInput(request: FastifyRequest) {
       } else fields[part.fieldname] = String(part.value ?? "");
     }
   } catch (error) {
+    // A file over the 10 MB limit used to be dropped here and reported as
+    // "no file was received". Say what actually happened.
+    if ((error as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE")
+      tooLarge = true;
     if (config.logLevel) {
       console.error("Multipart parsing error:", error);
     }
   }
-  return { fields, file };
+  return { fields, file, tooLarge };
+}
+const fileTooLarge = "That file is larger than 10 MB. Choose a smaller image or PDF.";
+function logDbError(scope: string, error: { message: string } | null) {
+  if (error && config.logLevel) console.error(`${scope} failed:`, error.message);
 }
 async function userFrom(request: FastifyRequest) {
   const token = bearer(request.headers.authorization);
@@ -139,11 +148,12 @@ async function permanentUserFrom(request: FastifyRequest) {
 async function reviewerFrom(request: FastifyRequest) {
   const auth = await permanentUserFrom(request);
   if (!auth) return null;
-  const { data } = await auth.service
+  const { data, error } = await auth.service
     .from("profiles")
     .select("role")
     .eq("id", auth.user.id)
     .maybeSingle();
+  logDbError("Reviewer role lookup", error);
   return data && ["reviewer", "admin"].includes(data.role) ? auth : null;
 }
 
@@ -157,7 +167,13 @@ export async function buildApp() {
     allowedHeaders: ["content-type", "authorization", "x-cron-secret"],
     methods: ["GET", "PATCH", "POST", "OPTIONS"],
   });
-  await app.register(helmet, { contentSecurityPolicy: false });
+  // Helmet's default Cross-Origin-Resource-Policy is "same-origin", which stops
+  // the website (a different origin) from displaying images served through
+  // /v1/evidence/:id/file. CORS above still restricts who may call the API.
+  await app.register(helmet, {
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   await app.register(multipart, {
     limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 10 },
@@ -168,6 +184,38 @@ export async function buildApp() {
     return reply
       .code(ok ? 200 : 503)
       .send({ ok, service: "vaada-backend", checks: readinessChecks });
+  });
+  // Booleans only. Tells you whether the backend's service role can really
+  // reach each table and the proof bucket - the failure that previously made
+  // uploads, review and proof images break with misleading errors.
+  app.get("/ready/db", async (_request, reply) => {
+    const service = serviceSupabase();
+    if (!service)
+      return reply
+        .code(503)
+        .send({ ok: false, error: "Supabase is not configured." });
+    const tables = [
+      "profiles",
+      "media_assets",
+      "commitments",
+      "evidence",
+      "timeline_events",
+      "submissions",
+    ];
+    const checks: Record<string, boolean> = {};
+    await Promise.all(
+      tables.map(async (table) => {
+        // Not a HEAD request: HEAD responses carry no body, so the real
+        // Postgres error ("permission denied for table ...") would be lost.
+        const { error } = await service.from(table).select("*").limit(1);
+        checks[table] = !error;
+        logDbError(`Readiness check (${table})`, error);
+      }),
+    );
+    const bucket = await service.storage.getBucket("proof-media");
+    checks["storage:proof-media"] = !bucket.error && !bucket.data?.public;
+    const ok = Object.values(checks).every(Boolean);
+    return reply.code(ok ? 200 : 503).send({ ok, checks });
   });
   app.get("/v1/promises", async () => ({
     commitments: await listCommitments(),
@@ -329,7 +377,8 @@ export async function buildApp() {
         return reply
           .code(401)
           .send({ error: "Log in before using assisted extraction." });
-      const { fields, file } = await multipartInput(request);
+      const { fields, file, tooLarge } = await multipartInput(request);
+      if (tooLarge) return reply.code(413).send({ error: fileTooLarge });
       const sourceUrl = (fields.sourceUrl ?? "").trim();
       const rawText = (fields.rawText ?? "").trim();
       if (!sourceUrl && !rawText && !file)
@@ -389,7 +438,8 @@ export async function buildApp() {
         return reply.code(401).send({
           error: "Log in with Google or email before uploading evidence.",
         });
-      const { fields, file } = await multipartInput(request);
+      const { fields, file, tooLarge } = await multipartInput(request);
+      if (tooLarge) return reply.code(413).send({ error: fileTooLarge });
       if (!file)
         return reply
           .code(400)
@@ -534,12 +584,20 @@ export async function buildApp() {
       }
     }
     if (value.mediaAssetId) {
-      const { data: asset } = await auth.service
+      const { data: asset, error: assetError } = await auth.service
         .from("media_assets")
         .select("id,owner_id,kind,status")
         .eq("id", value.mediaAssetId)
         .eq("owner_id", auth.user.id)
         .maybeSingle();
+      // A database/permission failure is not the same as "no such upload"; it
+      // used to be reported to the user as the latter.
+      if (assetError) {
+        logDbError("Upload lookup", assetError);
+        return reply.code(503).send({
+          error: "We could not verify your upload right now. Please try again.",
+        });
+      }
       const expected =
         value.submissionKind === "proof"
           ? "completion_proof"
@@ -632,7 +690,10 @@ export async function buildApp() {
     const { data, error } = await query.order("created_at", {
       ascending: true,
     });
-    if (error) return reply.code(400).send({ error: error.message });
+    if (error) {
+      logDbError("Review queue", error);
+      return reply.code(400).send({ error: error.message });
+    }
     const submissions = await Promise.all(
       (data ?? []).map(async (item) => {
         if (!item.proof_path) return item;
@@ -671,29 +732,40 @@ export async function buildApp() {
         .code(503)
         .send({ error: "Verified proof storage is not configured." });
     const { id } = request.params as { id: string };
+    if (!z.string().uuid().safeParse(id).success)
+      return reply.code(404).send({ error: "Verified proof was not found." });
     const { data, error } = await service
       .from("evidence")
       .select("storage_path,verdict,commitment:commitments!inner(published_at)")
       .eq("id", id)
       .maybeSingle();
+    if (error) {
+      logDbError("Evidence file lookup", error);
+      return reply
+        .code(503)
+        .send({ error: "Proof file is temporarily unavailable." });
+    }
     const commitment = Array.isArray(data?.commitment)
       ? data.commitment[0]
       : data?.commitment;
+    // "contested" evidence is listed publicly by commitments_public (it sets
+    // hasMedia), so its file must be viewable too - otherwise the site shows a
+    // broken image for it.
     if (
-      error ||
       !data?.storage_path ||
-      data.verdict !== "verified" ||
+      !["verified", "contested"].includes(data.verdict) ||
       !commitment?.published_at
     )
       return reply.code(404).send({ error: "Verified proof was not found." });
     const { data: signed } = await service.storage
       .from("proof-media")
-      .createSignedUrl(data.storage_path, 60);
-    return signed?.signedUrl
-      ? reply.redirect(signed.signedUrl)
-      : reply
-          .code(503)
-          .send({ error: "Proof file is temporarily unavailable." });
+      .createSignedUrl(data.storage_path, 300);
+    if (!signed?.signedUrl)
+      return reply
+        .code(503)
+        .send({ error: "Proof file is temporarily unavailable." });
+    // The signed link expires; do not let the 302 be cached past that.
+    return reply.header("cache-control", "private, max-age=60").redirect(signed.signedUrl);
   });
 
   app.post("/v1/agents/ingest", async (request, reply) => {

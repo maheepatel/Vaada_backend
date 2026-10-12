@@ -83,6 +83,91 @@ const categories: Record<string, string[]> = {
   Agriculture: ["farmer", "agriculture", "crop", "mandi"],
   Housing: ["housing", "homes", "houses", "resettlement"],
 };
+const months = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+];
+
+function isoDate(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  )
+    return "";
+  return date.toISOString().slice(0, 10);
+}
+
+// The form's <input type="date"> and the submission schema both need
+// YYYY-MM-DD, but a model reading a press release returns "12 March 2025".
+// Convert deterministically here instead of trusting the model's formatting.
+// Returns "" when the value is not a single unambiguous calendar date.
+export function normalizeDate(value: string) {
+  const text = value.trim().replace(/(\d)(st|nd|rd|th)\b/gi, "$1");
+  let match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) return isoDate(+match[1], +match[2], +match[3]);
+  match = text.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+  if (match) return isoDate(+match[3], +match[2], +match[1]); // Indian DD/MM/YYYY
+  match = text.match(/^(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})$/);
+  if (match) {
+    const month = months.findIndex((name) =>
+      name.startsWith(match![2].toLowerCase().slice(0, 3)),
+    );
+    return month < 0 ? "" : isoDate(+match[3], month + 1, +match[1]);
+  }
+  match = text.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (match) {
+    const month = months.findIndex((name) =>
+      name.startsWith(match![1].toLowerCase().slice(0, 3)),
+    );
+    return month < 0 ? "" : isoDate(+match[3], month + 1, +match[2]);
+  }
+  return "";
+}
+
+export function normalizeDraft(draft: ExtractedDraft): ExtractedDraft {
+  const warnings = [...draft.warnings];
+  const promisedOn = normalizeDate(draft.promisedOn);
+  let deadlineStart = normalizeDate(draft.deadlineStart);
+  const deadlineEnd = normalizeDate(draft.deadlineEnd);
+  if (draft.promisedOn && !promisedOn)
+    warnings.push(
+      `Promise date "${draft.promisedOn}" could not be read as one exact date. Please enter it.`,
+    );
+  if (deadlineStart && deadlineEnd && deadlineStart > deadlineEnd) {
+    warnings.push("The stated completion window was reversed and was cleared.");
+    deadlineStart = "";
+  }
+  const stateName = states.find(
+    (name) => name.toLowerCase() === draft.state.trim().toLowerCase(),
+  );
+  const label = draft.deadlineLabel.trim();
+  return {
+    ...draft,
+    promisedOn,
+    deadlineStart,
+    deadlineEnd,
+    // A bare connective such as "by" is not a timeframe.
+    deadlineLabel: /^(by|before|within|in|on|till|until)\.?$/i.test(label)
+      ? ""
+      : label,
+    state: stateName ?? draft.state.trim(),
+    district: draft.district.replace(/\s+district$/i, "").trim(),
+    warnings,
+  };
+}
+
 const privateHost =
   /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$)/i;
 
@@ -150,7 +235,7 @@ export function heuristic(sourceUrl: string, rawText: string): ExtractedDraft {
       "Public promise awaiting a clear title",
     promiseText: clean,
     sourceUrl,
-    promisedOn: /^20\d{2}-\d{2}-\d{2}$/.test(date) ? date : "",
+    promisedOn: normalizeDate(date),
     deadlineStart: "",
     deadlineEnd: "",
     deadlineLabel: deadline,
@@ -158,13 +243,18 @@ export function heuristic(sourceUrl: string, rawText: string): ExtractedDraft {
     district: "",
     category,
     accountableOffice: office,
+    // Same keys as the AI path so the form can rely on one shape.
     confidence: {
       title: clean ? 0.82 : 0.2,
+      promiseText: clean ? 0.6 : 0.1,
+      promisedOn: normalizeDate(date) ? 0.76 : 0.12,
+      deadlineStart: 0,
+      deadlineEnd: 0,
+      deadlineLabel: deadline ? 0.72 : 0.12,
       state: state ? 0.86 : 0.18,
+      district: 0,
       category: 0.68,
-      date: date ? 0.76 : 0.12,
-      deadline: deadline ? 0.72 : 0.12,
-      office: office ? 0.72 : 0.12,
+      accountableOffice: office ? 0.72 : 0.12,
     },
     warnings: [
       ...(!state ? ["State was not clear in the supplied source."] : []),
@@ -192,7 +282,14 @@ export async function extractWithAgent(input: {
   const base64Content: Array<Record<string, unknown>> = [
     {
       type: "text",
-      text: `Extract one concrete public promise from the supplied source. Preserve exact facts. Use empty strings for absent facts. Never infer truth or completion. Source URL: ${input.sourceUrl || "none"}\n\nSource text:\n${input.rawText || "Inspect the attached file."}`,
+      text: `Extract one concrete public promise from the supplied source. Preserve exact facts. Use empty strings for absent facts. Never infer truth or completion.
+Formatting rules:
+- promisedOn, deadlineStart and deadlineEnd must be ISO dates (YYYY-MM-DD), or "" if the source does not state one exact date. Convert "12 March 2025" to "2025-03-12". Never guess a missing day or month.
+- deadlineEnd is the latest stated completion date; deadlineStart only if the source states an earliest date.
+- deadlineLabel is the exact timeframe wording from the source (for example "by 31 December 2025" or "within 24 to 72 hours"), or "".
+- state is the Indian state or union territory name only; district is the district name without the word "district".
+- promiseText is the promise as worded in the source, not a paraphrase.
+Source URL: ${input.sourceUrl || "none"}\n\nSource text:\n${input.rawText || "Inspect the attached file."}`,
     },
   ];
   if (input.file) {
@@ -203,6 +300,16 @@ export async function extractWithAgent(input: {
         image_url: {
           url: `data:${input.file.mimeType};base64,${base64}`,
           detail: "high",
+        },
+      });
+    } else if (input.file.mimeType === "application/pdf") {
+      // Previously PDFs were accepted by the upload check but silently never
+      // sent to the model, so a PDF-only extraction came back empty.
+      base64Content.push({
+        type: "file",
+        file: {
+          filename: input.file.name.replace(/[^\w.-]+/g, "_") || "source.pdf",
+          file_data: `data:application/pdf;base64,${base64}`,
         },
       });
     }
@@ -233,5 +340,8 @@ export async function extractWithAgent(input: {
   const parsed = response.choices[0]?.message.parsed;
   if (!parsed)
     throw new Error("The extraction agent could not create a safe draft.");
-  return { draft: { ...parsed, sourceUrl: input.sourceUrl }, mode: "ai" };
+  return {
+    draft: normalizeDraft({ ...parsed, sourceUrl: input.sourceUrl }),
+    mode: "ai",
+  };
 }
